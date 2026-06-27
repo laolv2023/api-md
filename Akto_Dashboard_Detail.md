@@ -309,6 +309,8 @@ Dashboard 是最终部署单元，不被其他模块依赖。
 | `vulnerable_testing_run_result` | 漏洞结果 |
 | `testing_run_issues` | 测试问题 |
 | `traffic_metrics` | 流量指标 |
+| `traffic_info` | API 调用计数（按 URL+方法+小时桶） |
+| `api_hit_count_info` | API 调用计数（按 URL+方法+时间戳） |
 | `api_info` | API 元信息 |
 | `filter_sample_data` | 过滤后样本数据 |
 | `akto_data_types` | Akto 数据类型 |
@@ -319,6 +321,56 @@ Dashboard 是最终部署单元，不被其他模块依赖。
 | `organizations` | 组织 |
 | `compliance_infos` | 合规信息 |
 | `threat_compliance_info` | 威胁合规映射 |
+
+### 9.1 API Call Stats 功能
+
+Dashboard 提供 **API Call Stats** 功能（文档：https://docs.akto.io/api-inventory/concepts/api-call-stats），在 API 端点详情页显示两个图表：
+
+**Graph 1: API Call Count Over Time（调用次数时间序列图）**
+
+| 维度 | 值 |
+|---|---|
+| Action 方法 | `TrafficAction.fetchEndpointTrafficData()` |
+| 数据集合 | MongoDB `traffic_info` |
+| 数据写入方 | **api-runtime**（`RequestTemplate` 在处理流量时创建 `TrafficInfo` 记录） |
+| 数据结构 | `TrafficInfo { id: {url, method, responseCode, apiCollectionId, bucketStartEpoch, bucketEndEpoch}, mapHoursToCount: {epochHour → count} }` |
+| 时间粒度 | 按小时计数（`mapHoursToCount` 的 key 是 epochHours） |
+| 查询方式 | 按 url + method + apiCollectionId + 时间范围过滤，前端按天/小时聚合 |
+
+**Graph 2: API Call Frequency Distribution（调用频率分布直方图）**
+
+| 维度 | 值 |
+|---|---|
+| Action 方法 | `TrafficAction.fetchApiCallStats()` / `TrafficAction.fetchIpLevelApiCallStats()` |
+| 数据集合 | MongoDB `api_hit_count_info`（所有版本）+ threat-detection-backend API（企业版） |
+| 数据写入方 | **threat-detection** → **database-abstractor** |
+| 数据结构 | `ApiHitCountInfo { apiCollectionId, url, method, count, ts }` |
+| 企业版额外路径 | 调用 threat-detection-backend `/api/threat_detection/fetch_api_distribution_data`，返回分桶统计 (min/max/p25/p50/p75 + bucketLabel) |
+
+**数据链路：**
+
+```
+api-runtime
+  │ 处理流量时创建 TrafficInfo
+  └──→ MongoDB: traffic_info ──→ Dashboard: Graph 1 (时间序列)
+
+threat-detection (ApiCountInfoRelayCron)
+  │ 定时统计 API 调用次数
+  ├──→ database-abstractor → MongoDB: api_hit_count_info ──→ Dashboard: Graph 2 (直方图)
+  └──→ threat-detection-backend API ──→ Dashboard: Graph 2 (分桶统计)
+```
+
+**关键代码位置：**
+
+| 组件 | 文件 | 模块 |
+|---|---|---|
+| `TrafficAction.fetchEndpointTrafficData()` | `apps/dashboard/.../TrafficAction.java` | Dashboard |
+| `TrafficAction.fetchApiCallStats()` | `apps/dashboard/.../TrafficAction.java` | Dashboard |
+| `TrafficAction.fetchIpLevelApiCallStats()` | `apps/dashboard/.../TrafficAction.java` | Dashboard |
+| `TrafficInfo` 创建 | `libs/dao/.../RequestTemplate.java` | api-runtime |
+| `ApiHitCountInfo` 创建 | `apps/threat-detection/.../ApiCountInfoRelayCron.java` | threat-detection |
+| `ApiHitCountInfo` 写入 DB | `apps/database-abstractor/.../DbAction.java` | database-abstractor |
+| 分布数据 API | `apps/threat-detection-backend/.../ThreatDetectionRouter.java` | threat-detection-backend |
 
 ---
 
