@@ -568,7 +568,7 @@ api-runtime 及相关组件共生成 **12 种流量指标**，存储在 MongoDB 
 ```
 TrafficMetrics {
     _id: Key {
-        ip:                请求来源 IP
+        ip:                请求来源 IP（如 10.0.1.5）
         host:              Host 头（如 api.example.com，纯 IP 显示为 "ip-host"）
         vxlanID:           API Collection ID（VXLAN 隧道 ID）
         name:              指标名称（12 种之一）
@@ -583,20 +583,58 @@ TrafficMetrics {
 }
 ```
 
+#### 5.4.7 指标粒度
+
+**指标粒度为 IP + Host + API Collection + 天，不细分到单个 API 端点。**
+
+Key 中的 6 个维度中，没有 URL / endpoint / method 字段，因此 `/api/users/123` 和 `/api/orders/456` 的流量会合并到同一条记录里（只要来源 IP 和 Host 相同）。
+
+| 维度 | 是否区分 | 示例 |
+|---|---|---|
+| 来源 IP | ✅ 区分 | `10.0.1.5` vs `192.168.1.100` |
+| Host | ✅ 区分 | `api.example.com` vs `admin.example.com` |
+| API Collection | ✅ 区分 | vxlanID=1 vs vxlanID=2 |
+| URL / 端点 | ❌ 不区分 | `/api/users/123` 和 `/api/orders/456` 合并 |
+| HTTP 方法 | ❌ 不区分 | GET 和 POST 合并 |
+| 状态码 | ❌ 不区分 | 200 和 404 合并 |
+| 时间 | ✅ 按小时区分 | countMap 内按 epochHours 分 |
+
+**数据示例：**
+
+```
+// 同一天，同 IP + 同 Host = 一条记录，按小时分计
+{
+  _id: { ip: "10.0.1.5", host: "api.example.com", vxlanID: 1, name: "OUTGOING_REQUESTS_MIRRORING", ... },
+  countMap: { "14:00": 342, "15:00": 287, "16:00": 412, ... }
+}
+
+// 不同 Host = 不同记录
+{
+  _id: { ip: "10.0.1.5", host: "admin.example.com", vxlanID: 1, name: "OUTGOING_REQUESTS_MIRRORING", ... },
+  countMap: { "14:00": 56, "15:00": 43, "16:00": 61, ... }
+}
+
+// 不同来源 IP = 不同记录
+{
+  _id: { ip: "192.168.1.100", host: "api.example.com", vxlanID: 1, name: "OUTGOING_REQUESTS_MIRRORING", ... },
+  countMap: { "14:00": 89, "15:00": 92, "16:00": 78, ... }
+}
+```
+
 **时间粒度**：
 - 桶级别：1 天（`bucketStartEpoch = Context.now() / (3600*24)`）
 - 桶内部：按小时计数（`epochHours = System.currentTimeMillis() / (3600*1000)`）
 
 可查看每小时的流量趋势，最长查看每天的明细。
 
-#### 5.4.7 存储与上报
+#### 5.4.8 存储与上报
 
 | 去向 | 说明 | 条件 |
 |---|---|---|
 | MongoDB `traffic_metrics` 集合 | `syncTrafficMetricsWithDB()` 批量 upsert | 始终 |
 | `https://logs.akto.io/traffic-metrics` | 遥测数据上报到 Akto 云端 | 仅 `isOnprem == true` |
 
-#### 5.4.8 Dashboard 告警
+#### 5.4.9 Dashboard 告警
 
 Dashboard 的 `TrafficUpdates` 监控以下指标，当流量相比历史显著下降时触发告警：
 
