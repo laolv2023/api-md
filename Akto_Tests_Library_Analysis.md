@@ -468,6 +468,218 @@ OWASP:
 - 多语言修复示例（Python/Flask、Java/Spring、Node.js/Express）
 - 最佳实践建议
 
+### 5.8 Hyperscan 正则签名系统（与 YAML 规则并行）
+
+除了上述 5 个 YAML 威胁检测规则外，Akto 还有一套基于 **Intel Hyperscan** 高性能正则引擎的并行检测系统。两套系统**互补但独立**，通过 Stigg feature flag 切换。
+
+#### 5.8.1 系统对比
+
+| 维度 | 5 个 YAML 规则 | 56 条 Hyperscan 签名 |
+|---|---|---|
+| **匹配引擎** | Java 字符串 `contains_either` | Intel Hyperscan 正则引擎 |
+| **匹配精度** | 精确字符串包含 | PCRE 正则，支持变体 |
+| **性能** | 低（逐条字符串匹配） | 高（Hyperscan 单次扫描全部正则） |
+| **默认状态** | 启用（`isHyperscanEnabled=false`） | 禁用（需 Stigg 授权） |
+| **互斥** | Hyperscan 启用时跳过这 5 个默认规则 | — |
+| **更新源** | GitHub `tests-library:threat_policies_pro` | Azure Blob `threat-patterns.txt` |
+| **更新频率** | Dashboard 定时同步 | 每 15 分钟（`PatternUpdateService`） |
+| **覆盖类别** | 5 类 | 9 类（多了 NoSQLi, OS 命令注入, Windows 命令注入） |
+
+#### 5.8.2 签名文件格式
+
+文件地址：`https://akto.blob.core.windows.net/threat-config/threat-patterns.txt`（10 KB, 92 行）
+
+本地 fallback：`apps/threat-detection/src/main/resources/threat-patterns-example.txt`
+
+```
+<category>::<locations>::<regex_pattern>
+```
+
+- `category` — 签名名称，前缀表示攻击类别（如 `sqli_drop_table`）
+- `locations` — 检测位置，逗号分隔（`REQUEST_URL`, `REQUEST_HEADERS`, `REQUEST_BODY`, `RESPONSE_BODY`）
+- `regex_pattern` — PCRE 正则表达式，全部编译为 `CASELESS`（大小写不敏感）
+
+#### 5.8.3 56 条签名分布
+
+| 类别 | 签名数 | 严重程度 | 检测位置 |
+|---|---|---|---|
+| **XSS** | 13 | HIGH | 请求 URL/Headers/Body |
+| **SQL 注入** | 8 | HIGH | 请求 URL/Headers/Body |
+| **NoSQL 注入** | 8 | HIGH | 请求 URL/Headers/Body |
+| **Windows 命令注入** | 6 | HIGH | 请求 URL/Headers/Body |
+| **LFI/路径遍历** | 6 | HIGH | 请求 URL/Headers/Body |
+| **OS 命令注入** | 5 | HIGH | 请求 URL/Headers/Body |
+| **SSRF** | 4 | HIGH | 请求 URL/Headers/Body |
+| **安全配置错误** | 3 | LOW | 响应 Body |
+| **堆栈跟踪泄露** | 3 | LOW | 响应 Body |
+| **合计** | **56** | | |
+
+检测位置分布：
+
+| 检测位置 | 签名数 | 说明 |
+|---|---|---|
+| `REQUEST_URL` | 50 | 检测 URL/路径中的攻击模式 |
+| `REQUEST_BODY` | 49 | 检测请求体中的攻击模式 |
+| `REQUEST_HEADERS` | 48 | 检测请求头中的攻击模式 |
+| `RESPONSE_BODY` | 5 | 检测响应体中的泄露（仅安全配置错误类） |
+
+#### 5.8.4 各类别签名详情
+
+**SQL 注入 (8 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `sqli_drop_table` | DROP TABLE 语句 |
+| `sqli_union_select` | UNION SELECT 注入 |
+| `sqli_union_from` | UNION ... FROM 注入 |
+| `sqli_or_boolean` | OR/AND 布尔注入（`1=1`, `'a'='a'`, `true`, `false`） |
+| `sqli_exec_execute` | EXEC/EXECUTE 调用 |
+| `sqli_stacked_queries` | 堆叠查询（分号后接 SQL） |
+| `sqli_time_based` | 基于时间的盲注（`SLEEP`, `WAITFOR DELAY`, `pg_sleep`） |
+| `sqli_into_outfile` | INTO OUTFILE 写文件 |
+
+**XSS (13 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `xss_script_tag` | `<script>` 标签 |
+| `xss_script_data_src` | `<script data-src=` |
+| `xss_event_handler_alert` | `onerror=alert`, `onload=alert` 等事件处理器 |
+| `xss_iframe_embed` | `<iframe>`, `<embed>`, `<object>` |
+| `xss_svg_event` | `<svg onload=`, `<svg onerror=` |
+| `xss_javascript_protocol` | `javascript:` 协议 |
+| `xss_data_html_protocol` | `data:text/html` 协议 |
+| `xss_style_javascript` | CSS 中的 JavaScript |
+| `xss_style_tag_expression` | `<style>` 中的 `expression()` |
+| `xss_meta_refresh` | `<meta http-equiv=refresh>` 重定向 |
+| `xss_encoded_tags` | URL/HTML 编码的 `<script>` |
+| `xss_bare_alert` | 裸 `alert()` 调用 |
+| `xss_link_data_html` | `<link>` + `data:text/html` |
+
+**NoSQL 注入 (8 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `nosql_json_operators_comparison` | `$ne`, `$eq`, `$gt`, `$lt` 等比较操作符 |
+| `nosql_json_operators_logical` | `$and`, `$or`, `$not`, `$nor` 逻辑操作符 |
+| `nosql_json_operators_aggregation` | `$match`, `$group`, `$project` 聚合框架 |
+| `nosql_json_operators_update` | `$set`, `$unset`, `$inc` 更新操作符 |
+| `nosql_unquoted_operators` | 无引号的 `$` 操作符 |
+| `nosql_db_operations` | `db.collection.insert()`, `mapReduce()` |
+| `nosql_javascript_injection` | `this.field.match()`, `new Date()` |
+| `nosql_time_based` | `sleep()` 延迟注入 |
+
+**OS 命令注入 (5 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `os_cmd_shell_commands` | `ls`, `cat`, `id`, `whoami`, `wget`, `curl` 等 |
+| `os_cmd_pipe_chain` | `\|`, `\|\|`, `&&`, `;` 管道链接 |
+| `os_cmd_substitution` | `$(cmd)` 命令替换 |
+| `os_cmd_backtick_exec` | 反引号执行 |
+| `os_cmd_sleep_delay` | `sleep`, `ping -c` 延迟 |
+
+**Windows 命令注入 (6 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `windows_cmd_execution` | `cmd.exe`, `powershell.exe` |
+| `windows_system_commands` | `tasklist`, `netstat`, `ipconfig`, `nslookup` |
+| `windows_whoami` | `whoami` 命令 |
+| `windows_net_commands` | `net user`, `net localgroup`, `net share` |
+| `windows_powershell_syntax` | PowerShell 语法 |
+| `windows_ping` | `ping` 命令 |
+
+**SSRF (4 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `ssrf_localhost` | `127.0.0.1`, `localhost`, `[::1]` |
+| `ssrf_private_ip` | `192.168.x.x`, `10.x.x.x`, `172.16-31.x.x` |
+| `ssrf_metadata` | `169.254.169.254` (AWS/GCP/Azure metadata) |
+| `ssrf_file_protocol` | `file://` 协议 |
+
+**LFI/路径遍历 (6 条)** — 请求侧检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `lfi_directory_traversal` | `../`, `..\\` 路径遍历 |
+| `lfi_sensitive_files` | `/etc/passwd`, `/etc/shadow`, `.env`, `.git/config` |
+| `lfi_php_wrappers` | `php://filter`, `php://input`, `data://` |
+| `lfi_encoded_traversal` | URL 编码的 `../`（`%2e%2e%2f`） |
+| `lfi_null_byte` | `%00` 空字节截断 |
+| `lfi_log_files` | `/var/log/auth.log`, `/var/log/access.log` |
+
+**安全配置错误 + 堆栈跟踪 (6 条)** — 响应 Body 检测
+
+| 签名 | 检测目标 |
+|---|---|
+| `debug_enabled` | 响应中的调试信息（`debug:true`, `X-Debug-Token`） |
+| `version_disclosure` | 服务器版本泄露（`Server: Apache/2.4`, `X-AspNet-Version`） |
+| `stack_trace_java` | Java 堆栈跟踪（`Exception in thread`, `at com.akto...`） |
+| `stack_trace_python` | Python traceback（`Traceback (most recent call last)`） |
+| `stack_trace_go` | Go panic（`goroutine`, `panic:`） |
+
+#### 5.8.5 类别到 YAML 规则的映射
+
+`ThreatCategory` 枚举（`apps/threat-detection/src/main/java/com/akto/threat/detection/hyperscan/ThreatCategory.java`）将 Hyperscan 前缀映射到 YAML 规则 ID，使 Hyperscan 检测结果能通过现有的事件管道流转：
+
+| Hyperscan 前缀 | YAML Filter ID | 类别名 | 严重程度 |
+|---|---|---|---|
+| `sqli` | `SQLInjection` | SQL_INJECTION | HIGH |
+| `xss` | `XSS` | XSS | HIGH |
+| `nosql` | `NoSQLInjection` | NOSQL_INJECTION | HIGH |
+| `os_cmd` | `OSCommandInjection` | OS_COMMAND_INJECTION | HIGH |
+| `windows` | `WindowsCommandInjection` | COMMAND_INJECTION | HIGH |
+| `ssrf` | `SSRF` | SSRF | HIGH |
+| `lfi` | `LocalFileInclusionLFIRFI` | LFI_RFI | HIGH |
+| `debug`, `version`, `stack_trace` | `SecurityMisconfig` | SecurityMisconfig | LOW |
+
+> 注意：`NoSQLInjection`、`OSCommandInjection`、`WindowsCommandInjection` 三个 Filter ID 不在 `threat_policies_pro` 分支的 5 个 YAML 文件中，但存在于 `agentic-pro` 分支的 `Threat-Protection/` 目录（8 个文件），后者在加载时被 `processTemplateFilesZip()` 跳过。Hyperscan 系统通过 `ThreatCategory` 枚举直接引用这些 ID，不依赖 YAML 文件。
+
+#### 5.8.6 Hyperscan 工作流程
+
+```
+PatternUpdateService（每 15 分钟）
+    │
+    ├── 从 Azure Blob 下载 threat-patterns.txt
+    ├── 解析每行: <prefix>::<locations>::<regex>
+    ├── 创建 Expression 对象（CASELESS flag）
+    ├── 编译为 Hyperscan Database（单次编译全部正则）
+    └── 原子替换 HyperscanThreatMatcher 实例
+         │
+         ▼
+实时流量 (Kafka)
+    │
+    ▼
+MaliciousTrafficDetectorTask
+    │
+    ├── 检查 isHyperscanEnabled
+    │   ├── true  → HyperscanEventHandler.detectAndPushEvents()
+    │   │          ├── 对 REQUEST_URL/HEADERS/BODY/RESPONSE_BODY
+    │   │          │   执行 Hyperscan 单次扫描
+    │   │          ├── 匹配结果按 ThreatCategory 分组
+    │   │          ├── 每个 category 生成一个 MaliciousEvent
+    │   │          │   (EventType.EVENT_TYPE_SINGLE)
+    │   │          └── 推送到 Kafka 告警队列
+    │   │
+    │   └── false → FilterYamlDetectionStrategy (5 个 YAML 规则)
+    │              ├── ThreatDetector.applyFilter() 逐条匹配
+    │              ├── 检查 aggregation_rules (Redis 计数)
+    │              └── 生成 EVENT_TYPE_SINGLE 或 EVENT_TYPE_AGGREGATED
+    │
+    └── 自定义 YAML 规则始终运行（无论 Hyperscan 是否启用）
+```
+
+#### 5.8.7 附加防护层
+
+除 YAML 规则和 Hyperscan 签名外，Akto 威胁检测还包含两个独立的防护层：
+
+- **IP CIDR 黑名单** — 通过 `ThreatConfigurationEvaluator` 实现，基于 IP 地址或网段的访问控制
+- **Geofencing（地理围栏）** — 基于 MaxMind GeoIP 数据库（`resources/Geo-Country.mmdb`），按国家/地区限制 API 访问
+
+这两者属于 `ThreatConfiguration` 配置层，不在 `threat_policies_pro` 分支的 YAML 规则中，通过 Redis 实现速率限制和地理围栏判定。
+
 ---
 
 ## 6. MCP 分支
@@ -718,7 +930,8 @@ GitHub 不可达时：
 | 仓库总分支数 | 258 |
 | 运行时使用的分支数 | 6 |
 | **安全测试模板总数**（5 个测试分支去重后） | **5,382** |
-| **威胁检测规则总数** | **5** |
+| **YAML 威胁检测规则** | **5** |
+| **Hyperscan 正则签名** | **56** |
 | standard 分支 | 311 |
 | pro 分支 | 408（与 standard 零重叠） |
 | agentic-pro 分支 | 4,427（274 API + 4,153 AI Agent） |
@@ -734,16 +947,19 @@ GitHub 不可达时：
 
 ### 11.2 安全测试 vs 威胁检测
 
-| 维度 | 安全测试（5 个分支） | 威胁检测（threat_policies_pro） |
-|---|---|---|
-| **分支** | standard, pro, agentic-pro, mcp-standard, mcp-pro | threat_policies_pro |
-| **模板数** | 5,382 | 5 |
-| **目的** | 主动发请求验证漏洞 | 被动分析流量检测攻击 |
-| **MongoDB** | `yaml_templates` | `filter_yaml_templates` |
-| **执行服务** | akto-api-testing | akto-threat-detection + Dashboard MatchingJob |
-| **运行方式** | 用户触发 / 定时调度 | Kafka 实时流式 + 每 30 分钟批量 |
-| **YAML 结构** | `api_selection_filters` → `execute` → `validate` | `filter` → `aggregation_rules` |
-| **输出** | 漏洞报告 (TestingRunResult) | MaliciousEvent 告警 |
+| 维度 | 安全测试（5 个分支） | YAML 威胁检测（threat_policies_pro） | Hyperscan 威胁检测（Azure Blob） |
+|---|---|---|---|
+| **分支/来源** | standard, pro, agentic-pro, mcp-standard, mcp-pro | threat_policies_pro | threat-patterns.txt |
+| **模板/签名数** | 5,382 | 5 | 56 |
+| **目的** | 主动发请求验证漏洞 | 被动分析流量检测攻击 | 被动分析流量检测攻击 |
+| **MongoDB** | `yaml_templates` | `filter_yaml_templates` | 不存 DB，直接编译 |
+| **执行服务** | akto-api-testing | akto-threat-detection + MatchingJob | akto-threat-detection |
+| **运行方式** | 用户触发 / 定时调度 | Kafka 实时流式 + 每 30 分钟批量 | Kafka 实时流式 |
+| **匹配引擎** | N/A（发请求测试） | Java 字符串 contains_either | Intel Hyperscan 正则引擎 |
+| **更新源** | GitHub tests-library | GitHub tests-library | Azure Blob Storage |
+| **更新频率** | Dashboard 定时同步 | Dashboard 定时同步 | 每 15 分钟热更新 |
+| **默认状态** | 启用 | 启用 | 禁用（需 Stigg 授权） |
+| **输出** | 漏洞报告 (TestingRunResult) | MaliciousEvent 告警 | MaliciousEvent 告警 |
 
 ### 11.3 分支设计哲学
 
@@ -760,11 +976,12 @@ GitHub 不可达时：
 
 1. **代码使用 `standard` 分支，不是 `master`** — master 是旧版，standard 是替代版（311 vs 209 模板），两者 ID 零重叠
 2. **安全测试与威胁检测是两个独立系统** — 5 个分支用于安全测试（主动验证），threat_policies_pro 用于威胁检测（被动监控），写入不同 MongoDB 集合，由不同服务执行
-3. **threat_policies_pro 仅 5 个真正的威胁检测规则** — 其余 200 个模板是 agentic-pro 的副本，在加载时被代码跳过
-4. **威胁检测规则使用聚合告警机制** — Redis 滑动窗口计数，5 分钟内 50 次或 10 分钟内 100 次匹配才触发告警
-5. **所有模板运行时从 MongoDB 读取** — 不嵌入任何容器镜像，Dashboard 启动时从 GitHub 拉取
-6. **MCP 分支通过 Account Settings 动态加载** — 未在代码中硬编码，用户按需添加
-7. **Dashboard 内置 187 个模板仅作 fallback** — GitHub 不可达时使用，运行时会被 GitHub 版本覆盖
-8. **pro 的模板不是 standard 的增量** — 两者是独立设计的互补模板集，合并使用
+3. **威胁检测有双引擎架构** — 默认使用 5 个 YAML 规则（字符串匹配 + 聚合告警），启用 Hyperscan 后切换为 56 条正则签名（高性能单次扫描），两者互斥
+4. **Hyperscan 覆盖更多攻击类别** — YAML 规则覆盖 5 类（SQLi/XSS/SSRF/LFI/安全配置错误），Hyperscan 额外覆盖 NoSQL 注入、OS 命令注入、Windows 命令注入（共 9 类）
+5. **threat_policies_pro 仅 5 个真正的威胁检测规则** — 其余 200 个模板是 agentic-pro 的副本，在加载时被代码跳过
+6. **所有模板运行时从 MongoDB 读取** — 不嵌入任何容器镜像，Dashboard 启动时从 GitHub 拉取
+7. **MCP 分支通过 Account Settings 动态加载** — 未在代码中硬编码，用户按需添加
+8. **Dashboard 内置 187 个模板仅作 fallback** — GitHub 不可达时使用，运行时会被 GitHub 版本覆盖
+9. **pro 的模板不是 standard 的增量** — 两者是独立设计的互补模板集，合并使用
 
-Akto 测试库覆盖了 OWASP API Top 10、OWASP LLM Top 10、MCP 安全和 AI Agent 安全领域，同时提供运行时威胁检测能力，是目前开源社区中最全面的 API 安全平台之一。
+Akto 测试库覆盖了 OWASP API Top 10、OWASP LLM Top 10、MCP 安全和 AI Agent 安全领域，同时提供双引擎威胁检测能力（YAML 规则 + Hyperscan 正则签名），是目前开源社区中最全面的 API 安全平台之一。
