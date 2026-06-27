@@ -335,9 +335,39 @@ public ResourceAnalyser(
 
 ### 6.1 部署
 
-Context Analyzer 是 **Enterprise Only** 模块，社区版不含。
+Context Analyzer 的**源代码完全开源**（`apps/api-analyser/`），但在社区版中通过注释代码 + 不部署容器的方式关闭。
 
-**Docker 部署：**
+**三种部署模式对比：**
+
+| 模式 | DASHBOARD_MODE | Context Analyzer | Runtime Analyzer | 说明 |
+|---|---|---|---|---|
+| **社区版** | `local_deploy` | ❌ 不启用 | ✅ Dashboard 内嵌库 | 开源免费，docker-compose 不含 api-analyser |
+| **On-Prem** | `on_prem` | ✅ 独立容器 | ✅ 独立容器 | 企业自部署 |
+| **SaaS** | `saas` | ✅ 独立容器 | ✅ 独立容器 | Akto 云服务 |
+
+**社区版中关闭的证据：**
+
+```java
+// RuntimeListener.java L81 — ResourceAnalyser 实例化被注释掉
+// info.setResourceAnalyser(new ResourceAnalyser(300_000, 0.01, 100_000, 0.01));
+
+// Utils.java L620 — 同样被注释掉
+// info.setResourceAnalyser(new ResourceAnalyser(300_000, 0.01, 100_000, 0.01));
+
+// Utils.java L640-642 — 调用也被注释掉
+// info.getResourceAnalyser().analyse(responseParams);
+// info.getResourceAnalyser().syncWithDb();
+
+// docker-compose.yml — 不包含 api-analyser 容器
+// 只有: mongo, dashboard, testing, puppeteer-replay
+```
+
+**社区版不启用的原因：**
+- 需要独立的 Kafka + Zookeeper 基础设施，社区版用户通常没有
+- 需要长时间积累流量数据（1 小时+），社区版场景（手动导入流量）数据量不够
+- Dashboard 仍依赖 api-analyser 的 JAR（pom.xml 中有依赖），但 ResourceAnalyser 的实例化和调用全部被注释掉
+
+**企业版 Docker 部署：**
 ```bash
 docker run -d \
   -e AKTO_MONGO_CONN=mongodb://mongo:27017 \
@@ -709,3 +739,67 @@ Dashboard 读取 `single_type_info` 集合，在 API 清单页面展示每个参
 | accountId | `1_000_000` | 固定为 100 万（多租户通过 ResourceAnalyserMap 区分） |
 | 同步阈值 | 200,000 条 / 120 秒 | 不可配置 |
 | BF 容量 | 3 亿 / 1 亿 | 不可配置 |
+
+---
+
+## 13. 算法分析：是否使用了 ML？
+
+### 13.1 官方文档的说法
+
+官方文档（`Documentation/components/context-analyzer.md`）声称：
+
+> "This module processes all the traffic given to Akto but from a **stats and ML perspective**."
+
+还声称：
+
+> "finds out API dependencies, flow graph, private resources being shared in APIs"
+
+### 13.2 代码实际实现
+
+api-analyser 的全部算法逻辑是：
+
+| 组件 | 类型 | 说明 |
+|---|---|---|
+| **Bloom Filter** | 概率数据结构 | 高效判断"这个值之前见过吗？"，不是 ML |
+| **增量计数器** | 算术运算 | `uniqueCount++` / `publicCount++`，纯增量统计 |
+| **字符串比较** | 基本运算 | 判断参数值是否出现在其他端点（公开判定） |
+
+核心逻辑伪代码：
+
+```
+对每条流量:
+    提取参数值
+    if duplicateCheckerBF.mightContain(key):
+        跳过                                    # 已处理过
+    else:
+        duplicateCheckerBF.put(key)
+        uniqueCount++
+        if valuesBF.mightContain(value):
+            publicCount++                       # 值在其他端点见过 → 公开
+        else:
+            valuesBF.put(value)
+```
+
+### 13.3 代码中不存在的内容
+
+- ❌ 没有训练模型（无 TensorFlow / PyTorch / scikit-learn / Weka）
+- ❌ 没有推理逻辑
+- ❌ 没有聚类 / 分类 / 回归算法
+- ❌ 没有概率分布计算
+- ❌ 没有神经网络
+- ❌ 没有 Markov 链（Markov 在 api-runtime 的 `MarkovSync.java` 中，但 api-analyser 不使用）
+- ❌ 没有 Bayes / 熵 / 信息增益 / 方差 / 协方差
+- ❌ 没有异常检测 / 聚类
+
+### 13.4 文档声称但代码未实现的功能
+
+| 文档声称 | 代码实际 | 实际位置 |
+|---|---|---|
+| "finds out API dependencies" | ❌ api-analyser 不做 | api-runtime 的 `DependencyAnalyser.java` (470 行) |
+| "flow graph" | ❌ api-analyser 不做 | api-runtime 的 `Flow.java` (64 行) |
+| "ML perspective" | ❌ 无 ML 代码 | 全部是 Bloom Filter + 计数器 |
+| "private resources being shared in APIs" | ✅ 通过 uniqueCount/publicCount 间接实现 | 本模块唯一真正实现的功能 |
+
+### 13.5 结论
+
+api-analyser 使用的是**基于 Bloom Filter 的计数统计**，不是 ML。文档中的 "stats and ML perspective" 是对产品能力的**营销性描述**，实际实现是简单的概率数据结构 + 增量计数。文档声称的 "API dependencies" 和 "flow graph" 功能实际由 api-runtime 模块实现，不属于 api-analyser。
