@@ -429,6 +429,7 @@ public static boolean uniquenessDetermineFunction(String value)
 | `api_collections` | HttpCallParser | API 集合（id, name, host, vxlanId, urls） | ✅ |
 | `api_info` | AktoPolicyNew | API 元信息（认证类型, 敏感参数, 状态码, 访问类型） | ✅ |
 | `traffic_metrics` | HttpCallParser | 流量指标（请求数, 响应码分布, 时间戳） | ✅ |
+| `traffic_info` | RequestTemplate | API 调用计数（按 URL+方法+小时桶，供 Dashboard API Call Stats 使用） | ✅ |
 | `markov` | MarkovSync | Markov 链状态转移（current, next, count） | ✅ |
 | `relationship` | RelationshipSync | 参数关系（paramA → paramB, 关联值） | ✅ |
 | `filter_sample_data` | AktoPolicyNew | 过滤样本数据 | ✅ |
@@ -438,7 +439,48 @@ public static boolean uniquenessDetermineFunction(String value)
 | `mcp_audit_info` | McpToolsSyncJobExecutor | MCP 工具审计信息 | ✅ |
 | `account_settings` | Main | 账户配置（版本更新, CIDR 列表） | ✅ |
 
-### 5.2 SingleTypeInfo 文档结构
+### 5.2 API Call Stats 数据写入
+
+api-runtime 在处理流量时，通过 `RequestTemplate` 创建 `TrafficInfo` 记录，写入 MongoDB `traffic_info` 集合。这些数据供 Dashboard 的 **API Call Stats** 功能使用（文档：https://docs.akto.io/api-inventory/concepts/api-call-stats）。
+
+**TrafficInfo 数据结构：**
+
+```
+TrafficInfo {
+    _id: {
+        url:                    API 端点 URL
+        method:                 HTTP 方法
+        responseCode:           响应状态码
+        apiCollectionId:        API 集合 ID
+        bucketStartEpoch:       时间桶起始（月级）
+        bucketEndEpoch:         时间桶结束
+    }
+    mapHoursToCount: {
+        "1719504000": 34,       // epochHours → 调用次数
+        "1719507600": 28,
+        ...
+    }
+}
+```
+
+**数据流：**
+
+```
+api-runtime 处理每条流量
+  │
+  ├── RequestTemplate.matchRequestParams()
+  │   └── 更新 TrafficInfo.mapHoursToCount[epochHours] += 1
+  │
+  └──→ MongoDB: traffic_info
+        │
+        └──→ Dashboard: TrafficAction.fetchEndpointTrafficData()
+              │
+              └──→ 前端 Graph 1: API Call Count Over Time（时间序列图）
+```
+
+> **注意**：Dashboard 的 Graph 2（API Call Frequency Distribution，调用频率分布直方图）数据不由 api-runtime 提供，而是由 **threat-detection** 模块通过 `ApiCountInfoRelayCron` 定时统计，写入 `api_hit_count_info` 集合，或通过 threat-detection-backend API 返回分桶统计。
+
+### 5.3 SingleTypeInfo 文档结构
 
 ```json
 {
@@ -464,14 +506,14 @@ public static boolean uniquenessDetermineFunction(String value)
 }
 ```
 
-### 5.3 外部 HTTP 上报
+### 5.4 外部 HTTP 上报
 
 ```
 https://logs.akto.io/traffic-metrics
   └── 流量指标上报（请求数、响应码分布）
 ```
 
-### 5.4 Traffic Metrics（流量指标）完整清单
+### 5.5 Traffic Metrics（流量指标）完整清单
 
 api-runtime 及相关组件共生成 **12 种流量指标**，存储在 MongoDB `traffic_metrics` 集合中。
 
