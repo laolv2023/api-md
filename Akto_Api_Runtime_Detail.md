@@ -471,6 +471,140 @@ https://logs.akto.io/traffic-metrics
   └── 流量指标上报（请求数、响应码分布）
 ```
 
+### 5.4 Traffic Metrics（流量指标）完整清单
+
+api-runtime 及相关组件共生成 **12 种流量指标**，存储在 MongoDB `traffic_metrics` 集合中。
+
+#### 5.4.1 指标总览
+
+| # | 指标名称 | 显示名 | 说明 | 生成组件 |
+|---|---|---|---|---|
+| 1 | `TOTAL_REQUESTS_RUNTIME` | API calls received | Runtime 模块收到的 API 请求总数 | api-runtime (HttpCallParser) |
+| 2 | `FILTERED_REQUESTS_RUNTIME` | API calls processed | Runtime 模块成功处理的 API 请求数 | api-runtime (HttpCallParser) |
+| 3 | `INCOMING_PACKETS_MIRRORING` | Bytes received | 流量镜像接收到的原始字节数 | Traffic Collector (Go) |
+| 4 | `OUTGOING_PACKETS_MIRRORING` | Bytes processed for HTTP data | 成功解析为 HTTP 的字节数 | Traffic Collector (Go) |
+| 5 | `OUTGOING_REQUESTS_MIRRORING` | API calls extracted | 从镜像流量中提取出的 API 请求/响应对数 | Traffic Collector (Go) |
+| 6 | `TC_CPU_USAGE` | Traffic Collector CPU Usage | Traffic Collector CPU 使用率（百分比） | Traffic Collector (Go) |
+| 7 | `TC_MEMORY_USAGE` | Traffic Collector Memory Used | Traffic Collector 内存使用量（MB） | Traffic Collector (Go) |
+| 8 | `TC_HOST_MEMORY_USED_MB` | Traffic Collector Host Memory Used | 宿主机已用内存（MB） | Traffic Collector (Go) |
+| 9 | `TC_GOROUTINES` | Traffic Collector Goroutines | Go 协程数量 | Traffic Collector (Go) |
+| 10 | `TC_SYSTEM_CPU_PERCENT` | Traffic Collector System CPU Percent | 宿主机 CPU 使用率（百分比） | Traffic Collector (Go) |
+| 11 | `TC_TOTAL_CPU_USAGE` | Traffic Collector Total CPU Cores | 可用 CPU 核数 | Traffic Collector (Go) |
+| 12 | `TC_TOTAL_MEMORY_USAGE` | Traffic Collector Total Memory | 可用总内存（MB） | Traffic Collector (Go) |
+
+#### 5.4.2 三类指标的关系
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    Traffic Collector (Go 进程)                        │
+│                                                                      │
+│  原始流量 → [3] INCOMING_PACKETS_MIRRORING (接收字节)                  │
+│           → [4] OUTGOING_PACKETS_MIRRORING (HTTP解析成功字节)           │
+│           → [5] OUTGOING_REQUESTS_MIRRORING (提取的API调用数)           │
+│                                                                      │
+│  系统监控 → [6] TC_CPU_USAGE         (采集器CPU%)                      │
+│           → [7] TC_MEMORY_USAGE      (采集器内存MB)                    │
+│           → [8] TC_HOST_MEMORY_USED_MB (宿主机内存MB)                  │
+│           → [9] TC_GOROUTINES        (Go协程数)                       │
+│           → [10] TC_SYSTEM_CPU_PERCENT (宿主机CPU%)                   │
+│           → [11] TC_TOTAL_CPU_USAGE  (CPU核数)                        │
+│           → [12] TC_TOTAL_MEMORY_USAGE (总内存MB)                     │
+└────────────────────────┬─────────────────────────────────────────────┘
+                         │ Kafka
+                         ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    api-runtime (Java 进程)                            │
+│                                                                      │
+│  消费流量 → [1] TOTAL_REQUESTS_RUNTIME (收到的请求总数)                 │
+│           → [2] FILTERED_REQUESTS_RUNTIME (有效处理的请求数)            │
+│                                                                      │
+│  [1] - [2] = 被过滤的无效请求数（无效状态码等）                         │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+#### 5.4.3 Runtime 模块指标详解（2 种）
+
+这两种在 `HttpCallParser.syncFunction()` 中对每条来自**流量镜像**的请求计数（Postman/Burp/HAR 导入的流量不计入）：
+
+| 指标 | 代码位置 | 记录条件 | 含义 |
+|---|---|---|---|
+| `TOTAL_REQUESTS_RUNTIME` | HttpCallParser.java L611 | `Source.MIRRORING` 且收到请求 | Runtime 收到的镜像请求总数 |
+| `FILTERED_REQUESTS_RUNTIME` | HttpCallParser.java L736 | `Source.MIRRORING` 且通过 `validHttpResponseCode()` 校验 | 成功处理的有效请求数 |
+
+**差值含义**：`TOTAL - FILTERED = 被过滤的无效请求数`（无效状态码、解析失败等）
+
+#### 5.4.4 Mirroring 模块指标详解（3 种）
+
+由独立的 Go 语言 Traffic Collector 上报，Dashboard 的 `TrafficUpdates` 消费：
+
+| 指标 | 单位 | 说明 |
+|---|---|---|
+| `INCOMING_PACKETS_MIRRORING` | 字节 | 流量镜像模块接收的原始字节数 |
+| `OUTGOING_PACKETS_MIRRORING` | 字节 | 成功解析为 HTTP 数据的字节数 |
+| `OUTGOING_REQUESTS_MIRRORING` | 个 | 从镜像流量中提取出的完整 API 请求/响应对数 |
+
+**三者关系**：
+- `INCOMING`（原始字节）≥ `OUTGOING_PACKETS`（HTTP 成功字节）— 差值为非 HTTP 流量或解析失败
+- `OUTGOING_PACKETS` → `OUTGOING_REQUESTS` — 字节数转换为 API 调用数
+
+#### 5.4.5 Traffic Collector 系统指标详解（7 种）
+
+这些指标反映流量采集器自身的运行状态：
+
+| 指标 | 单位 | 说明 |
+|---|---|---|
+| `TC_CPU_USAGE` | 百分比 | Traffic Collector 进程的 CPU 使用率 |
+| `TC_MEMORY_USAGE` | MB | Traffic Collector 进程的内存使用量 |
+| `TC_HOST_MEMORY_USED_MB` | MB | 宿主机已用内存 |
+| `TC_GOROUTINES` | 个 | Go 运行时的协程数量（并发度指标） |
+| `TC_SYSTEM_CPU_PERCENT` | 百分比 | 宿主机整机 CPU 使用率 |
+| `TC_TOTAL_CPU_USAGE` | 核 | 可用 CPU 核数 |
+| `TC_TOTAL_MEMORY_USAGE` | MB | 可用总内存 |
+
+#### 5.4.6 数据结构
+
+每个指标的 Key 包含 6 个维度：
+
+```
+TrafficMetrics {
+    _id: Key {
+        ip:                请求来源 IP
+        host:              Host 头（如 api.example.com，纯 IP 显示为 "ip-host"）
+        vxlanID:           API Collection ID（VXLAN 隧道 ID）
+        name:              指标名称（12 种之一）
+        bucketStartEpoch:  时间桶起始（天级别，epoch / 86400）
+        bucketEndEpoch:    时间桶结束（bucketStartEpoch + 1）
+    }
+    countMap: {
+        "1719504000": 1234,   // epochHours → 计数
+        "1719507600": 5678,   // 每小时一个 key
+        ...
+    }
+}
+```
+
+**时间粒度**：
+- 桶级别：1 天（`bucketStartEpoch = Context.now() / (3600*24)`）
+- 桶内部：按小时计数（`epochHours = System.currentTimeMillis() / (3600*1000)`）
+
+可查看每小时的流量趋势，最长查看每天的明细。
+
+#### 5.4.7 存储与上报
+
+| 去向 | 说明 | 条件 |
+|---|---|---|
+| MongoDB `traffic_metrics` 集合 | `syncTrafficMetricsWithDB()` 批量 upsert | 始终 |
+| `https://logs.akto.io/traffic-metrics` | 遥测数据上报到 Akto 云端 | 仅 `isOnprem == true` |
+
+#### 5.4.8 Dashboard 告警
+
+Dashboard 的 `TrafficUpdates` 监控以下指标，当流量相比历史显著下降时触发告警：
+
+| 告警类型 | 监控指标 | 告警含义 |
+|---|---|---|
+| `OUTGOING_REQUESTS_MIRRORING` | 镜像提取的请求数下降 | 可能的镜像配置问题或采集器故障 |
+| `FILTERED_REQUESTS_RUNTIME` | Runtime 处理的请求数下降 | 可能的 Runtime 服务故障或流量过滤问题 |
+
 ---
 
 ## 6. 使用方式
